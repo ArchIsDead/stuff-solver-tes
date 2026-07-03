@@ -1,9 +1,6 @@
 "use strict";
 
 const { connect } = require('puppeteer-real-browser');
-const { PuppeteerScreenRecorder } = require('puppeteer-screen-recorder');
-const fs = require('fs');
-const path = require('path');
 
 const FAKE_PAGE = `<!DOCTYPE html>
 <html lang="en">
@@ -32,30 +29,14 @@ const FAKE_PAGE = `<!DOCTYPE html>
 </body>
 </html>`;
 
-function ensureDir(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
-
 class TurnstileSolver {
-  /**
-   * @param {object}  opts
-   * @param {number}  opts.timeout    - ms tunggu token (default 60000)
-   * @param {boolean} opts.record     - aktifkan screen recording (default false)
-   * @param {string}  opts.recordDir  - folder simpan recording (default './recordings')
-   * @param {object}  opts.proxy      - { host, port, username, password }
-   * @param {number}  opts.width      - viewport width (default 1280)
-   * @param {number}  opts.height     - viewport height (default 720)
-   */
   constructor(opts = {}) {
-    this.timeout   = opts.timeout   ?? 60000;
-    this.record    = opts.record    ?? false;
-    this.recordDir = opts.recordDir ?? path.join(process.cwd(), 'recordings');
-    this.proxy     = opts.proxy     ?? null;
-    this.width     = opts.width     ?? 1280;
-    this.height    = opts.height    ?? 720;
-
-    this.browser   = null;
-    this.isReady   = false;
+    this.timeout = opts.timeout ?? 60000;
+    this.width = opts.width ?? 1280;
+    this.height = opts.height ?? 720;
+    this.proxy = opts.proxy ?? null;
+    this.browser = null;
+    this.isReady = false;
   }
 
   async initialize() {
@@ -92,62 +73,25 @@ class TurnstileSolver {
     }
   }
 
-  async _startRecording(page, label) {
-    if (!this.record) return null;
-    ensureDir(this.recordDir);
-
-    const safe   = label.replace(/[^a-z0-9_-]/gi, '_');
-    const output = path.join(this.recordDir, `${safe}_${Date.now()}.mp4`);
-
-    const recorder = new PuppeteerScreenRecorder(page, {
-      followNewTab: false,
-      fps: 25,
-      videoFrame: { width: this.width, height: this.height },
-      videoCrf: 18,
-      videoCodec: 'libx264',
-      videoPreset: 'ultrafast',
-      aspectRatio: '16:9',
-    });
-
-    await recorder.start(output);
-    return { recorder, output };
-  }
-
-  async _stopRecording(rec) {
-    if (!rec) return;
-    try {
-      await rec.recorder.stop();
-    } catch (err) {
-      console.warn('[Turnstile] Failed to stop recording:', err.message);
-    }
-  }
-
   async _newPage() {
     const page = await this.browser.newPage();
-
     await page.setDefaultTimeout(30000);
     await page.setDefaultNavigationTimeout(30000);
-
     if (this.proxy?.username && this.proxy?.password) {
-      await page.authenticate({
-        username: this.proxy.username,
-        password: this.proxy.password,
-      });
+      await page.authenticate({ username: this.proxy.username, password: this.proxy.password });
     }
-
     return page;
   }
 
   async solveWithSitekey(url, siteKey) {
     if (!this.isReady) await this.initialize();
 
-    const t0   = Date.now();
+    const t0 = Date.now();
     const page = await this._newPage();
-    const rec  = await this._startRecording(page, `sitekey_${siteKey}`);
 
     try {
       const fakeHtml = FAKE_PAGE.replace(/<site-key>/g, siteKey);
-      const baseUrl  = url.endsWith('/') ? url : url + '/';
+      const baseUrl = url.endsWith('/') ? url : url + '/';
 
       await page.setRequestInterception(true);
       page.on('request', async (req) => {
@@ -165,85 +109,19 @@ class TurnstileSolver {
         document.querySelector('[name="cf-response"]')?.value ?? null
       );
 
-      await this._stopRecording(rec);
       await page.close();
 
-      if (!token || token.length < 10) throw new Error('Token invalid or empty');
+      if (!token || token.length < 10) throw new Error('token invalid or empty');
 
-      return {
-        success: true,
-        creator: 'XAi Community', // Jangan hapus! | Don't remove!
-        token,
-        time: +((Date.now() - t0) / 1000).toFixed(3),
-      };
+      return { success: true, token, time: +((Date.now() - t0) / 1000).toFixed(3) };
     } catch (err) {
-      await this._stopRecording(rec);
       try { await page.close(); } catch {}
-      return {
-        success: false,
-        error: err.message,
-        time: +((Date.now() - t0) / 1000).toFixed(3),
-      };
-    }
-  }
-
-  async solveFromPage(url) {
-    if (!this.isReady) await this.initialize();
-
-    const t0   = Date.now();
-    const page = await this._newPage();
-    const rec  = await this._startRecording(page, 'page_solve');
-
-    try {
-      await page.evaluateOnNewDocument(() => {
-        async function waitForToken() {
-          let token = null;
-          while (!token) {
-            try { token = window.turnstile?.getResponse(); } catch {}
-            await new Promise((r) => setTimeout(r, 500));
-          }
-          const c   = document.createElement('input');
-          c.type    = 'hidden';
-          c.name    = 'cf-response';
-          c.value   = token;
-          document.body.appendChild(c);
-        }
-        waitForToken();
-      });
-
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForSelector('[name="cf-response"]', { timeout: this.timeout });
-
-      const token = await page.evaluate(() =>
-        document.querySelector('[name="cf-response"]')?.value ?? null
-      );
-
-      await this._stopRecording(rec);
-      await page.close();
-
-      if (!token || token.length < 10) throw new Error('Token invalid or empty');
-
-      return {
-        success: true,
-        creator: 'XAi Community', // Jangan hapus! | Don't remove!
-        token,
-        time: +((Date.now() - t0) / 1000).toFixed(3),
-      };
-    } catch (err) {
-      await this._stopRecording(rec);
-      try { await page.close(); } catch {}
-      return {
-        success: false,
-        error: err.message,
-        time: +((Date.now() - t0) / 1000).toFixed(3),
-      };
+      return { success: false, error: err.message, time: +((Date.now() - t0) / 1000).toFixed(3) };
     }
   }
 
   async solve(url, siteKey = null) {
-    return siteKey
-      ? this.solveWithSitekey(url, siteKey)
-      : this.solveFromPage(url);
+    return this.solveWithSitekey(url, siteKey);
   }
 }
 
